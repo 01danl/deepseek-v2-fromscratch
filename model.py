@@ -48,40 +48,9 @@ class CausalAttention(nn.Module):
 
     def forward(self, x, use_cache=False):
         B, T, C = x.size()
+        # B - batch size, T - seq length, c - dimension of the vector
 
         q = self.q_proj(x)  # x_t @ W_Q
-        c_kv = self.wckv(x)  # C_KV = x_t @ W_DKV
+        ckv = self.wckv(x)  # C_KV = x_t @ W_DKV
 
-        if use_cache:
-            assert self.cache_len + T <= self.block_size, "KV cache overflow"
-            past = self.cache_len
-            self.latents[:B, past : past + T] = c_kv.detach()
-            c_all = self.latents[:B, : past + T]  # (B, S, latent_dim)
-            self.cache_len += T
-        else:
-            past = 0
-            c_all = c_kv
-
-        S = c_all.size(1)  # total key length = past + T
-
-        # up-project latents to full K and V
-        k = self.wuk(c_all)  # (B, S, C)
-        v = self.wuv(c_all)  # (B, S, C)
-
-        # split into heads
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hd)
-        k = k.view(B, S, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, S, hd)
-        v = v.view(B, S, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, S, hd)
-
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # (B, nh, T, S)
-
-        # queries sit at positions past..past+T-1, keys at 0..S-1
-        mask = self.bias[:, :, past : past + T, :S]
-        att = att.masked_fill(mask == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-
-        y = att @ v  # (B, nh, T, hd)
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
-
-        return self.resid_dropout(self.c_proj(y))
+        uk_proj = 
