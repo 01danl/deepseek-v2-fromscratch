@@ -11,10 +11,10 @@ class CausalAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embed = config.n_embed
 
-        self.q_proj = nn.Linear(config.n_embd, config.n_embd) # Linear(in, out)
+        self.q_proj = nn.Linear(config.n_embed, config.n_embed) # Linear(in, out)
 
         self.latent_dim = config.latent_dim
-        self.wckv = nn.Linear(config.n_embd, self.latent_dim)
+        self.wckv = nn.Linear(config.n_embed, self.latent_dim)
         self.wuk = nn.Linear(self.latent_dim, config.n_embed)
         self.wuv = nn.Linear(self.latent_dim, config.n_embed)
 
@@ -51,16 +51,18 @@ class CausalAttention(nn.Module):
         # B - batch size, T - seq length, c - dimension of the vector
 
         q = self.q_proj(x)  # x_t @ W_Q
-        q = q.view(B, T, self.n_head, C // self.n_head).transponse(1,2)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         ckv = self.wckv(x)  # C_KV = x_t @ W_DKV
 
         #every head gets its own projection slice
-        uk_proj = self.wuk.weight.view(self.n_head, -1, self.latent_dim)
-        uv_proj = self.wuv.weight.view(self.n_head, -1, self.latent_dim)
+        uk_proj = self.wuk.weight.view(self.n_head, self.head_dim, self.latent_dim)
+        uv_proj = self.wuv.weight.view(self.n_head, self.head_dim, self.latent_dim)
 
-        Q_absorbed = torch.matmul(q, uk_proj)
+        Q_absorbed = torch.matmul(q, uk_proj) * self.head_dim ** -0.5
 
         attn_weights = torch.matmul(Q_absorbed, ckv.unsqueeze(-3).mT)
-        attn_weights = F.softmax(attn_weights, dim=1)
-        
-         
+        attn_weights = attn_weights.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
+
+        return attn_weights 
