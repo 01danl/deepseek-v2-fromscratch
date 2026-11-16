@@ -1,22 +1,52 @@
 # MLA
 The main part of the MLA is compressed latent vector:
 
-$Q = x W_Q$
+## Matrix Absorption
 
-$C_{KV} = x \times W_{DKV}$
+\[
+Q = x W_Q
+\]
 
-$K = C_{KV} \times W_{UK}$
+\[
+C_{KV} = x W_{DKV}
+\]
 
-$V = C_{KV} \times W_{UV}$
+\[
+K = C_{KV} W_{UK}
+\]
 
-# Matrix Absorption
+\[
+V = C_{KV} W_{UV}
+\]
 
-let's reminder that K is $K = C_{KV} \times W_{UK}$
-then: 
-	$Q \times K^T = (x_t \times W_Q)(C_{KV} \times W_{UK})^T$
+Let's recall that:
 
-from linear algebra we know that: $(AB)^T = B^T \times A^T$
-so:
+\[
+K = C_{KV} W_{UK}
+\]
 
-$(x_t \times W_Q) \times W_{UK}^T \times C_{KV}^T$
-$x_t \times (W_Q \times W_{UK}^T) \times C_{KV}^T$
+Then:
+
+\[
+Q K^T = (x_t W_Q)(C_{KV} W_{UK})^T
+\]
+
+From linear algebra, we know that:
+
+\[
+(AB)^T = B^T A^T
+\]
+
+Therefore:
+
+\[
+Q K^T = (x_t W_Q) W_{UK}^T C_{KV}^T
+\]
+
+Rearranging the terms:
+
+\[
+\boxed{
+Q K^T = x_t (W_Q W_{UK}^T) C_{KV}^T
+}
+\]
