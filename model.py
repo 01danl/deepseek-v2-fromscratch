@@ -51,6 +51,16 @@ class CausalAttention(nn.Module):
         # B - batch size, T - seq length, c - dimension of the vector
 
         q = self.q_proj(x)  # x_t @ W_Q
+        q = q.view(B, T, self.n_head, C // self.n_head).transponse(1,2)
         ckv = self.wckv(x)  # C_KV = x_t @ W_DKV
 
-        uk_proj = 
+        #every head gets its own projection slice
+        uk_proj = self.wuk.weight.view(self.n_head, -1, self.latent_dim)
+        uv_proj = self.wuv.weight.view(self.n_head, -1, self.latent_dim)
+
+        Q_absorbed = torch.matmul(q, uk_proj)
+
+        attn_weights = torch.matmul(Q_absorbed, ckv.unsqueeze(-3).mT)
+        attn_weights = F.softmax(attn_weights, dim=1)
+        
+         
