@@ -4,6 +4,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        dtype = x.dtype
+        x = x.float()
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (x * self.weight.float()).to(dtype)
+
+
 class CausalAttention(nn.Module):
     def __init__(self, config, device):
         super().__init__()
