@@ -41,6 +41,7 @@ class RotaryEmbedding(nn.Module):
 
     def apply(self, x, offset=0):
         # x: (B, T, dim) или (B, n_head, T, dim)
+        dtype = x.dtype
         T = x.size(-2)
         cos = self.cos_cached[offset:offset + T]
         sin = self.sin_cached[offset:offset + T]
@@ -49,7 +50,7 @@ class RotaryEmbedding(nn.Module):
         else:
             cos, sin = cos.unsqueeze(0).unsqueeze(0), sin.unsqueeze(0).unsqueeze(0)  # (1, 1, T, dim)
         x = x.float()
-        return (x * cos + rotate_half(x) * sin).to(x.dtype)
+        return (x * cos + rotate_half(x) * sin).to(dtype)
 
 
 class CausalAttention(nn.Module):
