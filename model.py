@@ -89,11 +89,15 @@ class CausalAttention(nn.Module):
         self.max_batch_size = config.max_batch_size
 
         # cache for latent kv + k_rope (их и храним вместо полных K/V)
-        self.latents = torch.zeros(
-            (self.max_batch_size, self.block_size, self.latent_dim), device=device
+        self.register_buffer(
+            "latents",
+            torch.zeros(self.max_batch_size, self.block_size, self.latent_dim, device=device),
+            persistent=False,
         )
-        self.k_rope_cache = torch.zeros(
-            (self.max_batch_size, self.block_size, self.qk_rope_dim), device=device
+        self.register_buffer(
+            "k_rope_cache",
+            torch.zeros(self.max_batch_size, self.block_size, self.qk_rope_dim, device=device),
+            persistent=False,
         )
         self.cache_len = 0
 
@@ -111,33 +115,41 @@ class CausalAttention(nn.Module):
 
     def forward(self, x, use_cache=False):
         B, T, _ = x.size()
-        # B - batch size, T - seq length, c - dimension of the vector
+        offset = self.cache_len if use_cache else 0
 
         q = self.q_proj(x)
         q = q.view(B, T, self.n_head, self.qk_nope_dim + self.qk_rope_dim).transpose(1, 2)
         q_nope, q_rope = q.split([self.qk_nope_dim, self.qk_rope_dim], dim=-1)
 
-        q_rope = self.rope(q_rope)  # (B, h, T, rope)
-        k_rope = self.krope_proj(x)       # (B, T, rope) — общий для всех голов
-        k_rope = self.rope(k_rope)  # (B, T, rope)
+        q_rope = self.rope(q_rope, offset=offset)
+        k_rope = self.krope_proj(x)
+        k_rope = self.rope(k_rope, offset=offset)
 
-        ckv = self.wckv(x)  # C_KV = x_t @ W_DKV
+        ckv = self.wckv(x)
 
-        #every head gets its own projection slice
+        if use_cache:
+            S = offset + T
+            assert B <= self.max_batch_size and S <= self.block_size
+            self.latents[:B, offset:S] = ckv.detach()
+            self.k_rope_cache[:B, offset:S] = k_rope.detach()
+            self.cache_len = S
+            ckv = self.latents[:B, :S]
+            k_rope = self.k_rope_cache[:B, :S]
+        else:
+            S = T
+
         uk_proj = self.wuk.weight.view(self.n_head, self.qk_nope_dim, self.latent_dim)
+        Q_absorbed = torch.matmul(q_nope, uk_proj)
 
-        Q_absorbed = torch.matmul(q_nope, uk_proj)  # (B, h, T, latent_dim)
-
-        # score = q_nope * k_nope^T (absorption) + q_rope * k_rope^T (RoPE)
-        attn_nope = torch.matmul(Q_absorbed, ckv.unsqueeze(-3).mT)  # (B, h, T, S)
-        attn_rope = torch.matmul(q_rope, k_rope.unsqueeze(1).mT)    # (B, h, T, S), k_rope broadcast по головам
+        attn_nope = torch.matmul(Q_absorbed, ckv.unsqueeze(-3).mT)
+        attn_rope = torch.matmul(q_rope, k_rope.unsqueeze(1).mT)
         attn_weights = (attn_nope + attn_rope) * self.scale
-        attn_weights = attn_weights.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+        attn_weights = attn_weights.masked_fill(self.bias[:, :, offset:S, :S] == 0, float("-inf"))
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_weights = self.attn_dropout(attn_weights)
 
-        v = self.wuv(ckv).view(B, T, self.n_head, self.v_dim).transpose(1, 2)  # (B, h, T, v_dim)
-        y = torch.matmul(attn_weights, v)            # (B, h, T, v_dim)
+        v = self.wuv(ckv).view(B, S, self.n_head, self.v_dim).transpose(1, 2)
+        y = torch.matmul(attn_weights, v)
         y = y.transpose(1, 2).reshape(B, T, self.n_head * self.v_dim)
         y = self.c_proj(y)
 
@@ -229,6 +241,29 @@ class DeepSeekV2(nn.Module):
     def reset_cache(self):
         for layer in self.layers:
             layer.attn.reset_cache()
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        self.eval()
+        self.reset_cache()
+        logits, _ = self(idx[:, -self.config.block_size:], use_cache=True)
+        for _ in range(max_new_tokens):
+            logits = logits[:, -1, :]
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = float("-inf")
+            if temperature == 0:
+                next_tok = logits.argmax(dim=-1, keepdim=True)
+            else:
+                probs = F.softmax(logits / temperature, dim=-1)
+                next_tok = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat([idx, next_tok], dim=1)
+            if self.layers[0].attn.cache_len >= self.config.block_size:
+                self.reset_cache()
+                logits, _ = self(idx[:, -self.config.block_size:], use_cache=True)
+            else:
+                logits, _ = self(next_tok, use_cache=True)
+        return idx
 
     def forward(self, idx, targets=None, use_cache=False, return_aux=False):
         B, T = idx.size()
