@@ -157,10 +157,12 @@ class CausalAttention(nn.Module):
         self.register_buffer(
             "latents",
             torch.zeros(self.max_batch_size, self.block_size, self.latent_dim, device=device),
+            persistent=False,
         )
         self.register_buffer(
             "k_rope_cache",
             torch.zeros(self.max_batch_size, self.block_size, self.qk_rope_dim, device=device),
+            persistent=False,
         )
         self.cache_len = 0
 
@@ -179,9 +181,19 @@ class CausalAttention(nn.Module):
     def _ensure_cache(self, B, S, dtype, device):
         b, s = self.latents.shape[0], self.latents.shape[1]
         if B > b or S > s or self.latents.dtype != dtype or self.latents.device != device:
-            b, s = max(B, b), max(S, s)
-            self.latents = torch.zeros(b, s, self.latent_dim, dtype=dtype, device=device)
-            self.k_rope_cache = torch.zeros(b, s, self.qk_rope_dim, dtype=dtype, device=device)
+            new_b, new_s = max(B, b), max(S, s)
+            new_latents = torch.zeros(new_b, new_s, self.latent_dim, dtype=dtype, device=device)
+            new_k_rope = torch.zeros(new_b, new_s, self.qk_rope_dim, dtype=dtype, device=device)
+            if self.cache_len > 0:
+                copy_b = min(B, b)
+                new_latents[:copy_b, :self.cache_len] = self.latents[:copy_b, :self.cache_len].to(
+                    dtype=dtype, device=device
+                )
+                new_k_rope[:copy_b, :self.cache_len] = self.k_rope_cache[:copy_b, :self.cache_len].to(
+                    dtype=dtype, device=device
+                )
+            self.register_buffer("latents", new_latents, persistent=False)
+            self.register_buffer("k_rope_cache", new_k_rope, persistent=False)
 
     def forward(self, x, use_cache=False):
         B, T, _ = x.size()
@@ -342,16 +354,27 @@ class DeepSeekV2(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, input_ids, max_new_tokens, temperature=1.0):
+    def generate(self, input_ids, max_new_tokens, temperature=1.0, top_k=None):
+        self.eval()
         self.reset_cache()
         ids = input_ids
-        self.forward(ids, use_cache=True, return_aux=False)
+        logits, _ = self.forward(ids[:, -self.config.block_size:], use_cache=True, return_aux=False)
         for _ in range(max_new_tokens):
-            logits, _ = self.forward(ids[:, -1:], use_cache=True, return_aux=False)
-            if temperature != 1.0:
-                logits = logits / temperature
-            next_id = torch.argmax(logits[:, -1], dim=-1, keepdim=True)
+            next_logits = logits[:, -1, :]
+            if top_k is not None:
+                v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
+                next_logits[next_logits < v[:, [-1]]] = float("-inf")
+            if temperature == 0:
+                next_id = next_logits.argmax(dim=-1, keepdim=True)
+            else:
+                probs = F.softmax(next_logits / temperature, dim=-1)
+                next_id = torch.multinomial(probs, num_samples=1)
             ids = torch.cat([ids, next_id], dim=1)
+            if self.layers[0].self_attn.cache_len >= self.config.block_size:
+                self.reset_cache()
+                logits, _ = self.forward(ids[:, -self.config.block_size:], use_cache=True, return_aux=False)
+            else:
+                logits, _ = self.forward(next_id, use_cache=True, return_aux=False)
         self.reset_cache()
         return ids
 
