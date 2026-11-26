@@ -73,8 +73,10 @@ class DeepSeekMoE(nn.Module):
         self.n_shared = getattr(config, "n_shared_experts", 2)
         self.top_k = config.num_experts_per_tok
         self.n_group = getattr(config, "n_group", 1)
+        self.topk_group = getattr(config, "topk_group", 1)
         self.alpha1 = getattr(config, "aux_loss_alpha", 0.001)
         self.alpha2 = getattr(config, "dev_loss_alpha", 0.001)
+        self.alpha3 = getattr(config, "comm_loss_alpha", 0.001)
         self.seq_aux = getattr(config, "seq_aux", True)
 
         self.experts = nn.ModuleList(Expert(d, m, bias=bias) for _ in range(self.n_routed))
@@ -87,6 +89,7 @@ class DeepSeekMoE(nn.Module):
         E = self.n_routed
         K = self.top_k
         G = self.n_group
+        gs = self.gate.group_size
 
         if self.seq_aux:
             counts = F.one_hot(idx.view(B, T * K), E).float().sum(dim=-2)
@@ -96,6 +99,10 @@ class DeepSeekMoE(nn.Module):
             f_g = f.view(B, G, -1).mean(dim=-1)
             P_g = P.view(B, G, -1).sum(dim=-1)
             dev_bal = self.alpha2 * (f_g * P_g).sum(dim=-1).mean()
+
+            sent = F.one_hot(idx.view(B, T, K) // gs, G).float().amax(dim=-2)
+            f_sent = sent.sum(dim=1) * G / (T * self.topk_group)
+            comm_bal = self.alpha3 * (f_sent * P_g).sum(dim=-1).mean()
         else:
             counts = F.one_hot(idx.reshape(-1), E).float().mean(dim=0)
             f = counts * E
@@ -105,7 +112,16 @@ class DeepSeekMoE(nn.Module):
             P_g = P.view(G, -1).sum(dim=-1)
             dev_bal = self.alpha2 * (f_g * P_g).sum()
 
-        return {"exp_bal": exp_bal, "dev_bal": dev_bal, "aux": exp_bal + dev_bal}
+            sent = F.one_hot(idx.reshape(-1, K) // gs, G).float().amax(dim=1)
+            f_sent = sent.mean(dim=0) * G / self.topk_group
+            comm_bal = self.alpha3 * (f_sent * P_g).sum()
+
+        return {
+            "exp_bal": exp_bal,
+            "dev_bal": dev_bal,
+            "comm_bal": comm_bal,
+            "aux": exp_bal + dev_bal + comm_bal,
+        }
 
     def forward(self, x, return_aux=False):
         B, T, d = x.shape
